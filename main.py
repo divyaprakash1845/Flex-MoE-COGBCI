@@ -1,12 +1,19 @@
 from sklearn.metrics import roc_auc_score as original_roc_auc_score
-
 import os
 import torch
 import numpy as np
 import argparse
 import random
-import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import classification_report, accuracy_score, f1_score
+from copy import deepcopy
+from tqdm import trange
+from models import FlexMoE
+from utils import seed_everything, setup_logger
+from data import load_and_preprocess_data, create_loaders, load_and_preprocess_cogbci
+import warnings
+
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork()")
+
 def custom_roc_auc(y_true, y_score, **kwargs):
     y_score = np.array(y_score)
     if len(y_score.shape) == 2 and y_score.shape[1] == 2:
@@ -15,14 +22,6 @@ def custom_roc_auc(y_true, y_score, **kwargs):
     else:
         try: return original_roc_auc_score(y_true, y_score, **kwargs)
         except ValueError: return 0.50
-from sklearn.metrics import accuracy_score, f1_score
-from copy import deepcopy
-from tqdm import trange
-from models import FlexMoE
-from utils import seed_everything, setup_logger
-from data import load_and_preprocess_data, create_loaders, load_and_preprocess_cogbci
-import warnings
-warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork()")
 
 # Utility function to convert string to bool
 def str2bool(s):
@@ -36,26 +35,26 @@ def parse_args():
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--task', type=str, default='PVT', help='Cognitive task to run')
     parser.add_argument('--data', type=str, default='adni')
-    parser.add_argument('--modality', type=str, default='IGCB') # I G C B for ADNI, L N C for MIMIC
-    parser.add_argument('--preprocessed', type=str2bool, default=True) # Whether to use preprocessed image modality
-    parser.add_argument('--initial_filling', type=str, default='mean') # None mean
+    parser.add_argument('--modality', type=str, default='IGCB') 
+    parser.add_argument('--preprocessed', type=str2bool, default=True) 
+    parser.add_argument('--initial_filling', type=str, default='mean') 
     parser.add_argument('--train_epochs', type=int, default=50)
     parser.add_argument('--warm_up_epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--hidden_dim', type=int, default=128)
-    parser.add_argument('--top_k', type=int, default=4) # Number of Routers
-    parser.add_argument('--num_patches', type=int, default=16) # Number of Patches for Input Token
-    parser.add_argument('--num_experts', type=int, default=16) # Number of Experts
-    parser.add_argument('--num_routers', type=int, default=1) # Number of Routers
-    parser.add_argument('--num_layers_enc', type=int, default=1) # Number of MLP layers for encoders
-    parser.add_argument('--num_layers_fus', type=int, default=1) # Number of MLP layers for fusion model
-    parser.add_argument('--num_layers_pred', type=int, default=1) # Number of MLP layers for prediction head
-    parser.add_argument('--num_heads', type=int, default=4) # Number of heads
-    parser.add_argument('--num_workers', type=int, default=4) # Number of workers for DataLoader
-    parser.add_argument('--pin_memory', type=str2bool, default=True) # Pin memory in DataLoader
-    parser.add_argument('--use_common_ids', type=str2bool, default=False) # Use common ids across modalities    
-    parser.add_argument('--dropout', type=float, default=0.5) # Number of Routers
+    parser.add_argument('--top_k', type=int, default=4) 
+    parser.add_argument('--num_patches', type=int, default=16) 
+    parser.add_argument('--num_experts', type=int, default=16) 
+    parser.add_argument('--num_routers', type=int, default=1) 
+    parser.add_argument('--num_layers_enc', type=int, default=1) 
+    parser.add_argument('--num_layers_fus', type=int, default=1) 
+    parser.add_argument('--num_layers_pred', type=int, default=1) 
+    parser.add_argument('--num_heads', type=int, default=4) 
+    parser.add_argument('--num_workers', type=int, default=4) 
+    parser.add_argument('--pin_memory', type=str2bool, default=True) 
+    parser.add_argument('--use_common_ids', type=str2bool, default=False)  
+    parser.add_argument('--dropout', type=float, default=0.5) 
     parser.add_argument('--gate_loss_weight', type=float, default=1e-2)
     parser.add_argument('--save', type=str2bool, default=True)
     parser.add_argument('--load_model', type=str2bool, default=False)
@@ -135,7 +134,6 @@ def train_and_evaluate(args, seed, save_path=None):
     train_loader, train_loader_shuffle, val_loader, test_loader = create_loaders(data_dict, observed_idx_arr, labels, train_ids, valid_ids, test_ids, args.batch_size, args.num_workers, args.pin_memory, input_dims, transforms, masks, args.preprocessed, args.use_common_ids)
     fusion_model = FlexMoE(num_modalities, full_modality_index, args.num_patches, args.hidden_dim, n_labels, args.num_layers_fus, args.num_layers_pred, args.num_experts, args.num_routers, args.top_k, args.num_heads, args.dropout).to(device)
     
-    # ADD THIS LOOP
     for enc in encoder_dict.values():
         enc.to(device)    
     params = list(fusion_model.parameters()) + [param for encoder in encoder_dict.values() for param in encoder.parameters()]    
@@ -152,7 +150,7 @@ def train_and_evaluate(args, seed, save_path=None):
     best_val_acc = 0.0
 
     if save_path is None:
-        for epoch in trange(args.train_epochs):
+        for epoch in range(args.train_epochs):
             fusion_model.train()
             for encoder in encoder_dict.values():
                 encoder.train()
@@ -162,7 +160,6 @@ def train_and_evaluate(args, seed, save_path=None):
                 warm_up_tag = ''
                 train_epochs = args.train_epochs
             else:
-                # activate modality-based sorting
                 train_loader_new = train_loader
                 warm_up_tag = 'Warm Up ' 
                 train_epochs = args.warm_up_epochs
@@ -170,6 +167,9 @@ def train_and_evaluate(args, seed, save_path=None):
             ## Training
             task_losses, gate_losses = run_epoch(args, train_loader_new, encoder_dict, modality_dict, missing_embeds, fusion_model, criterion, device, is_training=True, optimizer=optimizer, gate_loss_weight=args.gate_loss_weight)
             
+            # FORMATTED EPOCH PRINT (Matches MAESTRO)
+            print(f"   Epoch {epoch+1}/{args.train_epochs} | Loss:\n{np.mean(task_losses):.4f}")
+
             ## Validation
             fusion_model.eval()
             for encoder in encoder_dict.values():
@@ -181,15 +181,12 @@ def train_and_evaluate(args, seed, save_path=None):
             val_auc = custom_roc_auc(val_labels, val_probs, multi_class='ovr')
 
             if val_acc > best_val_acc:
-                print(f" [(**Best**) {warm_up_tag}Epoch {epoch+1}/{train_epochs}] Val Acc: {val_acc*100:.2f}, Val F1: {val_f1*100:.2f}, Val AUC: {val_auc*100:.2f}")
                 best_val_acc = val_acc
                 best_val_f1 = val_f1
                 best_val_auc = val_auc
                 best_model_me = deepcopy(missing_embeds)
                 best_model_fus = deepcopy(fusion_model)
                 best_model_enc = deepcopy(encoder_dict)
-
-            print(f"[Seed {seed}/{args.n_runs-1}] [{warm_up_tag}Epoch {epoch+1}/{train_epochs}] Task Loss: {np.mean(task_losses):.2f}, Router Loss: {np.mean(gate_losses):.2f} / Val Acc: {val_acc*100:.2f}, Val F1: {val_f1*100:.2f}, Val AUC: {val_auc*100:.2f}")
 
         # Save the best model
         if args.save:
@@ -200,26 +197,18 @@ def train_and_evaluate(args, seed, save_path=None):
                 'fusion_model': best_model_fus.state_dict(),
                 'encoder_dict': {modality: deepcopy(encoder.state_dict()) for modality, encoder in best_model_enc.items()}
             }, save_path)
-
-            print(f"Best model saved to {save_path}")
     
     else:
         best_model_me = missing_embeds
         best_model_fus = fusion_model
         best_model_enc = encoder_dict
-
-        # Load the saved model onto the correct device (GPU or CPU)
         checkpoint = torch.load(save_path, map_location=device)
-
-        # Load the models' states
         best_model_me = checkpoint['missing_embeds']
         best_model_fus.load_state_dict(checkpoint['fusion_model'])
         for modality, encoder in best_model_enc.items():
             encoder.load_state_dict(checkpoint['encoder_dict'][modality])
             encoder.to(device)
             encoder.eval()
-
-        # Move the models to the correct device if necessary
         best_model_me.to(device)
         best_model_fus.to(device)
 
@@ -237,46 +226,27 @@ def train_and_evaluate(args, seed, save_path=None):
     test_f1 = f1_score(test_labels, test_preds, average='macro')
     test_auc = custom_roc_auc(test_labels, test_probs, multi_class='ovr')
 
+    # ==========================================================
+    # FINAL RESULTS BANNER (Matches MAESTRO Format)
+    # ==========================================================
+    print("\n========================================")
+    print(f"🏆 FLEX-MOE RESULTS FOR {args.task} WORKLOAD")
+    print("========================================")
+    report = classification_report(test_labels, test_preds, target_names=['Low', 'High'], digits=2, zero_division=0)
+    print(report)
+
     return best_val_acc, best_val_f1, best_val_auc, test_acc, test_f1, test_auc
+
 
 def main():
     args, _ = parse_args()
     logger = setup_logger('./logs', f'{args.data}', f'{args.modality}.txt')
-    seeds = range(args.n_runs)    
-    val_accs = []
-    val_f1s = []
-    val_aucs = []
-    test_accs = []
-    test_f1s = []
-    test_aucs = []
     
-    log_summary = "======================================================================================\n"
+    # Run only 1 seed to match MAESTRO's single run output format
+    seeds = range(1)    
+    val_accs, val_f1s, val_aucs = [], [], []
+    test_accs, test_f1s, test_aucs = [], [], []
     
-    model_kwargs = {
-        "model": 'FlexMoE',
-        "modality": args.modality,
-        "initial_filling": args.initial_filling,
-        "use_common_ids": args.use_common_ids,
-        "train_epochs": args.train_epochs,
-        "warm_up_epochs": args.warm_up_epochs,
-        "num_experts": args.num_experts,
-        "num_routers": args.num_routers,
-        "top_k": args.top_k,
-        "num_layers_enc": args.num_layers_enc,
-        "num_layers_fus": args.num_layers_fus,
-        "num_layers_pred": args.num_layers_pred,
-        "num_heads": args.num_heads,
-        "lr": args.lr,
-        "batch_size": args.batch_size,
-        "hidden_dim": args.hidden_dim,
-        "num_patches": args.num_patches,
-        "gate_loss_weight": args.gate_loss_weight,
-    }
-
-    log_summary += f"Model configuration: {model_kwargs}\n"
-
-    print('Modality:', args.modality)
-
     for seed in seeds:
         if (not args.save) & (args.load_model):
             save_path = f'./saves/seed_{seed}_modality_{args.modality}_train_epochs_{args.train_epochs}.pth'
@@ -289,33 +259,6 @@ def main():
         test_accs.append(test_acc)
         test_f1s.append(test_f1)
         test_aucs.append(test_auc)
-    
-    val_avg_acc = np.mean(val_accs)*100
-    val_std_acc = np.std(val_accs)*100
-    val_avg_f1 = np.mean(val_f1s)*100
-    val_std_f1 = np.std(val_f1s)*100
-    val_avg_auc = np.mean(val_aucs)*100
-    val_std_auc = np.std(val_aucs)*100
-
-    test_avg_acc = np.mean(test_accs)*100
-    test_std_acc = np.std(test_accs)*100
-    test_avg_f1 = np.mean(test_f1s)*100
-    test_std_f1 = np.std(test_f1s)*100
-    test_avg_auc = np.mean(test_aucs)*100
-    test_std_auc = np.std(test_aucs)*100
-
-    log_summary += f'[Val] Average Accuracy: {val_avg_acc:.2f} ± {val_std_acc:.2f} '
-    log_summary += f'[Val] Average F1 Score: {val_avg_f1:.2f} ± {val_std_f1:.2f} '
-    log_summary += f'[Val] Average AUC: {val_avg_auc:.2f} ± {val_std_auc:.2f} / '  
-    log_summary += f'[Test] Average Accuracy: {test_avg_acc:.2f} ± {test_std_acc:.2f} '
-    log_summary += f'[Test] Average F1 Score: {test_avg_f1:.2f} ± {test_std_f1:.2f} '
-    log_summary += f'[Test] Average AUC: {test_avg_auc:.2f} ± {test_std_auc:.2f} '  
-
-    print(model_kwargs)
-    print(f'[Val] Average Accuracy: {val_avg_acc:.2f} ± {val_std_acc:.2f} / Average F1 Score: {val_avg_f1:.2f} ± {val_std_f1:.2f} / Average AUC: {val_avg_auc:.2f} ± {val_std_auc:.2f}')
-    print(f'[Test] Average Accuracy: {test_avg_acc:.2f} ± {test_std_acc:.2f} / Average F1 Score: {test_avg_f1:.2f} ± {test_std_f1:.2f} / Average AUC: {test_avg_auc:.2f} ± {test_std_auc:.2f}')
-
-    logger.info(log_summary)
 
 if __name__ == '__main__':
     main()
