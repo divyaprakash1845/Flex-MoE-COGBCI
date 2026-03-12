@@ -1,4 +1,3 @@
-%%writefile /content/Flex-MoE-COGBCI/build_tensors_all.py
 import torch
 import glob
 import os
