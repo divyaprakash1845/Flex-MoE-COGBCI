@@ -1,14 +1,3 @@
-Here is the absolute final, copy-pasteable `README.md`. It incorporates everything exactly as it runs in your Colab environment right now, assuming you have updated `build_tensors_all.py` in your repository.
-
----
-
-# Flex-MoE: Cognitive Workload Classification
-
-**Flexible Mixture-of-Experts for Arbitrary Modality Combination**
-This repository implements a modified Flex-MoE architecture to classify cognitive workload using 9-channel EEG and ECG data. It serves as the baseline for comparing Sparse Mixture-of-Experts against custom physiological architectures.
-
-**Note for Google Colab Users:** Ensure your runtime is set to **T4 GPU** (or any available GPU) before running the installation, as the FastMoE engine requires CUDA compilers.
-
 ## Setup & Installation
 
 To initialize the environment in Google Colab, run the following block to clone the repository, install dependencies, and compile the custom C++ engine:
