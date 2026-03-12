@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import scanpy as sc
+# import scanpy as sc
 import torch
 from torch.utils.data import Dataset, DataLoader
 import json
@@ -431,7 +431,50 @@ def create_loaders(data_dict, observed_idx, labels, train_ids, valid_ids, test_i
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=pin_memory)
 
     return train_loader, train_loader_shuffle, val_loader, test_loader
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+import numpy as np
+import torch
 
+class TS_Encoder(nn.Module):
+    def __init__(self, in_channels, out_patches, hidden_dim):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool1d(out_patches)
+        self.proj = nn.Linear(in_channels, hidden_dim)
+        
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        x = self.pool(x)
+        x = x.transpose(1, 2)
+        return self.proj(x)
+
+def load_and_preprocess_cogbci(args, modality_dict):
+    full_data = torch.load(f'./raw_data/cogbci_data_{args.task}.pt')
+    labels = torch.load(f'./raw_data/cogbci_labels_{args.task}.pt').long()
+    N = full_data.shape[0]
+    
+    eeg_data = full_data[:, :, :8]
+    ecg_data = full_data[:, :, 8:]
+    data_dict = {'eeg': eeg_data, 'ecg': ecg_data, 'modality_comb': np.full(N, 2)}
+    
+    encoder_dict = {
+        'eeg': TS_Encoder(8, args.num_patches, args.hidden_dim),
+        'ecg': TS_Encoder(1, args.num_patches, args.hidden_dim)
+    }
+    
+    indices = np.arange(N)
+    # Python 3.12 namespace fix using train_idx_temp
+    train_idx_temp, test_ids = train_test_split(indices, test_size=0.2, random_state=args.seed)
+    train_ids, valid_ids = train_test_split(train_idx_temp, test_size=0.125, random_state=args.seed) 
+    
+    n_labels = 2  # Binary Workload
+    input_dims = {'eeg': 8, 'ecg': 1}
+    transforms = {'eeg': None, 'ecg': None}
+    masks = {'eeg': np.ones(N, dtype=bool), 'ecg': np.ones(N, dtype=bool)}
+    observed_idx_arr = np.ones((N, 2), dtype=bool)
+    full_modality_index = np.arange(N)
+    
+    return data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index
 # Updated: full modality index is 0.
 def get_modality_combinations(modalities):
     all_combinations = []
