@@ -1,15 +1,26 @@
+from sklearn.metrics import roc_auc_score as original_roc_auc_score
 
 import os
 import torch
 import numpy as np
 import argparse
 import random
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+import numpy as np
+from sklearn.metrics import accuracy_score, f1_score
+def custom_roc_auc(y_true, y_score, **kwargs):
+    y_score = np.array(y_score)
+    if len(y_score.shape) == 2 and y_score.shape[1] == 2:
+        try: return original_roc_auc_score(y_true, y_score[:, 1])
+        except ValueError: return 0.50 
+    else:
+        try: return original_roc_auc_score(y_true, y_score, **kwargs)
+        except ValueError: return 0.50
+from sklearn.metrics import accuracy_score, f1_score
 from copy import deepcopy
 from tqdm import trange
 from models import FlexMoE
 from utils import seed_everything, setup_logger
-from data import load_and_preprocess_data, create_loaders
+from data import load_and_preprocess_data, create_loaders, load_and_preprocess_cogbci
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork()")
 
@@ -23,6 +34,7 @@ def str2bool(s):
 def parse_args():
     parser = argparse.ArgumentParser(description='FlexMoE')
     parser.add_argument('--device', type=int, default=0)
+    parser.add_argument('--task', type=str, default='PVT', help='Cognitive task to run')
     parser.add_argument('--data', type=str, default='adni')
     parser.add_argument('--modality', type=str, default='IGCB') # I G C B for ADNI, L N C for MIMIC
     parser.add_argument('--preprocessed', type=str2bool, default=True) # Whether to use preprocessed image modality
@@ -116,16 +128,26 @@ def train_and_evaluate(args, seed, save_path=None):
         modality_dict = {'image':0, 'genomic': 1, 'clinical': 2, 'biospecimen': 3}
         args.n_full_modalities = len(modality_dict)
         data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_data(args, modality_dict)
-        
+    elif args.data == 'cogbci':
+        modality_dict = {'eeg':0, 'ecg': 1}
+        args.n_full_modalities = len(modality_dict)
+        data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_cogbci(args, modality_dict)    
     train_loader, train_loader_shuffle, val_loader, test_loader = create_loaders(data_dict, observed_idx_arr, labels, train_ids, valid_ids, test_ids, args.batch_size, args.num_workers, args.pin_memory, input_dims, transforms, masks, args.preprocessed, args.use_common_ids)
     fusion_model = FlexMoE(num_modalities, full_modality_index, args.num_patches, args.hidden_dim, n_labels, args.num_layers_fus, args.num_layers_pred, args.num_experts, args.num_routers, args.top_k, args.num_heads, args.dropout).to(device)
+    
+    # ADD THIS LOOP
+    for enc in encoder_dict.values():
+        enc.to(device)    
     params = list(fusion_model.parameters()) + [param for encoder in encoder_dict.values() for param in encoder.parameters()]    
     if num_modalities > 1:
         missing_embeds = torch.nn.Parameter(torch.randn((2**num_modalities)-1, args.n_full_modalities, args.num_patches, args.hidden_dim, dtype=torch.float, device=device), requires_grad=True)
         params += [missing_embeds]
 
     optimizer = torch.optim.Adam(params, lr=args.lr)
-    criterion = torch.nn.CrossEntropyLoss() if args.data == 'adni' else torch.nn.CrossEntropyLoss(torch.tensor([0.25, 0.75]).to(device))
+    if args.data in ['adni', 'cogbci']:
+        criterion = torch.nn.CrossEntropyLoss()
+    else:
+        criterion = torch.nn.CrossEntropyLoss(torch.tensor([0.25, 0.75]).to(device))
 
     best_val_acc = 0.0
 
@@ -156,7 +178,7 @@ def train_and_evaluate(args, seed, save_path=None):
                 val_preds, val_labels, val_probs = run_epoch(args, val_loader, encoder_dict, modality_dict, missing_embeds, fusion_model, criterion, device)
             val_acc = accuracy_score(val_labels, val_preds)
             val_f1 = f1_score(val_labels, val_preds, average='macro')
-            val_auc = roc_auc_score(val_labels, val_probs, multi_class='ovr')
+            val_auc = custom_roc_auc(val_labels, val_probs, multi_class='ovr')
 
             if val_acc > best_val_acc:
                 print(f" [(**Best**) {warm_up_tag}Epoch {epoch+1}/{train_epochs}] Val Acc: {val_acc*100:.2f}, Val F1: {val_f1*100:.2f}, Val AUC: {val_auc*100:.2f}")
@@ -206,21 +228,21 @@ def train_and_evaluate(args, seed, save_path=None):
             val_preds, val_labels, val_probs = run_epoch(args, val_loader, best_model_enc, modality_dict, best_model_me, best_model_fus, criterion, device)
         best_val_acc = accuracy_score(val_labels, val_preds)
         best_val_f1 = f1_score(val_labels, val_preds, average='macro')
-        best_val_auc = roc_auc_score(val_labels, val_probs, multi_class='ovr')
+        best_val_auc = custom_roc_auc(val_labels, val_probs, multi_class='ovr')
 
     ## Test
     with torch.no_grad():
         test_preds, test_labels, test_probs = run_epoch(args, test_loader, best_model_enc, modality_dict, best_model_me, best_model_fus, criterion, device)
     test_acc = accuracy_score(test_labels, test_preds)
     test_f1 = f1_score(test_labels, test_preds, average='macro')
-    test_auc = roc_auc_score(test_labels, test_probs, multi_class='ovr')
+    test_auc = custom_roc_auc(test_labels, test_probs, multi_class='ovr')
 
     return best_val_acc, best_val_f1, best_val_auc, test_acc, test_f1, test_auc
 
 def main():
     args, _ = parse_args()
     logger = setup_logger('./logs', f'{args.data}', f'{args.modality}.txt')
-    seeds = np.arange(args.n_runs) # [0, 1, 2]
+    seeds = range(args.n_runs)    
     val_accs = []
     val_f1s = []
     val_aucs = []
